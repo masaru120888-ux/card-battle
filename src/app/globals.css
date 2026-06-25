@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-serif: "Hiragino Mincho ProN", "Yu Mincho", serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at 50% 0%, #1a1d29 0%, #0b0d12 60%);
+  color: #e9e7e0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Subtle starfield / oracle texture */
+.oracle-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(216, 180, 90, 0.5), transparent),
+    radial-gradient(1px 1px at 70% 60%, rgba(111, 123, 182, 0.5), transparent),
+    radial-gradient(1px 1px at 40% 80%, rgba(216, 180, 90, 0.35), transparent);
+  pointer-events: none;
+  z-index: 0;
+}
