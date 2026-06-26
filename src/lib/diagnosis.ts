@@ -8,10 +8,19 @@ import {
   type Question,
 } from "@/data/gameData";
 
-/** A single answer to a diagnosis question: true = Yes, false = No. */
-export type Answer = boolean;
+// Diagnosis spec (data/animal-databank.xlsx README):
+//  1. Draw one question per axis (EI/NS/TF/JP) at random = 4 questions.
+//  2. Each answered on a 5-step slider. Dominant pole per axis -> MBTI (16 types).
+//  3. Sum the per-answer tier value (0..8) and draw Tier 1/2/3 by a weighted table.
 
-/** The two MBTI letters that sit at each end of every axis. */
+/** Slider position: 1 = full "no/left", 3 = neutral, 5 = full "yes/right". */
+export type SliderValue = 1 | 2 | 3 | 4 | 5;
+
+/** Injectable RNG returning [0, 1). Defaults to Math.random; overridden in tests. */
+export type Rng = () => number;
+
+const AXES: AxisKey[] = ["EI", "NS", "TF", "JP"];
+
 const AXIS_LETTERS: Record<AxisKey, [string, string]> = {
   EI: ["E", "I"],
   NS: ["N", "S"],
@@ -19,116 +28,106 @@ const AXIS_LETTERS: Record<AxisKey, [string, string]> = {
   JP: ["J", "P"],
 };
 
-/**
- * Extract the single MBTI letter contained in a pole label.
- * Pole labels look like "外向(E)", "内向(I)", "現実(S)" — we read the letter in parens.
- */
+/** Read the single MBTI letter from a pole label like "外向(E)" / "内向(I)". */
 function letterOf(pole: string, axis: AxisKey): string {
   const [a, b] = AXIS_LETTERS[axis];
   if (pole.includes(`(${a})`)) return a;
   if (pole.includes(`(${b})`)) return b;
-  // Fallback: a bare letter somewhere in the label.
-  if (pole.includes(a)) return a;
-  return b;
+  return pole.includes(a) ? a : b;
 }
 
-export interface AxisTally {
+/** Per-axis slider scoring (left + right always sum to 4; tierVal = |v-3|). */
+export function scoreSlider(v: SliderValue): {
+  left: number;
+  right: number;
+  tierVal: number;
+} {
+  return { left: 5 - v, right: v - 1, tierVal: Math.abs(v - 3) };
+}
+
+export interface AxisOutcome {
   axis: AxisKey;
-  /** Net score: positive favors the first letter (E/N/T/J), negative the second (I/S/F/P). */
-  score: number;
-  /** Total questions answered on this axis (for margin/confidence). */
-  count: number;
+  question: Question;
+  value: SliderValue;
   letter: string;
+  tierVal: number;
 }
 
 export interface DiagnosisResult {
   code: string;
   type: PersonalityType;
   animal: Animal;
-  tallies: AxisTally[];
-  /** Sum of absolute axis margins — how decisive the answers were overall. */
-  conviction: number;
+  tier: number;
+  tierTotal: number;
+  perAxis: AxisOutcome[];
 }
 
-/**
- * Tally answers per axis. Each Yes adds the question's yesPole letter,
- * each No adds the leftPole letter. We accumulate toward the first letter
- * of the axis as +1 and the second as -1.
- */
-export function tallyAxes(
-  answers: Answer[],
-  questions: Question[] = QUESTIONS,
-): AxisTally[] {
-  const acc: Record<AxisKey, { score: number; count: number }> = {
-    EI: { score: 0, count: 0 },
-    NS: { score: 0, count: 0 },
-    TF: { score: 0, count: 0 },
-    JP: { score: 0, count: 0 },
-  };
-
-  questions.forEach((q, i) => {
-    const answer = answers[i];
-    if (answer === undefined) return;
-    const pole = answer ? q.yesPole : q.leftPole;
-    const letter = letterOf(pole, q.axis);
-    const [first] = AXIS_LETTERS[q.axis];
-    acc[q.axis].score += letter === first ? 1 : -1;
-    acc[q.axis].count += 1;
-  });
-
-  return (Object.keys(acc) as AxisKey[]).map((axis) => {
-    const { score, count } = acc[axis];
-    const [first, second] = AXIS_LETTERS[axis];
-    // Ties default to the second letter (I/S/F/P), the more reserved pole.
-    const letter = score > 0 ? first : second;
-    return { axis, score, count, letter };
+/** Pick one random question per axis, in EI/NS/TF/JP order. */
+export function pickQuestions(rng: Rng = Math.random, pool: Question[] = QUESTIONS): Question[] {
+  return AXES.map((axis) => {
+    const candidates = pool.filter((q) => q.axis === axis);
+    return candidates[Math.floor(rng() * candidates.length)];
   });
 }
 
-/** Build the 4-letter MBTI code from per-axis tallies, in EI-NS-TF-JP order. */
-export function codeFromTallies(tallies: AxisTally[]): string {
-  const order: AxisKey[] = ["EI", "NS", "TF", "JP"];
-  return order
-    .map((axis) => tallies.find((t) => t.axis === axis)?.letter ?? "")
-    .join("");
-}
-
 /**
- * Pick one of the (up to 3) animals for a type by tier.
- *
- * NOTE: the data does not define how tier is chosen from a diagnosis. We use
- * "conviction": more decisive answers (larger summed axis margins) yield a
- * higher tier. This is an intentional, easily-swappable assumption — see plan.
+ * Weighted Tier draw from the README table (tier value 0..8).
+ *   low  (0-2): 60 / 30 / 10
+ *   mid  (3-5): 25 / 50 / 25
+ *   high (6-8): 10 / 30 / 60
  */
-export function selectAnimal(code: string, conviction: number, pool: Animal[] = ANIMALS): Animal {
-  const candidates = pool
-    .filter((a) => a.type === code)
-    .sort((a, b) => a.tier - b.tier);
-  if (candidates.length === 0) {
-    throw new Error(`No animal defined for type ${code}`);
+export function drawTier(tierTotal: number, rng: Rng = Math.random): number {
+  const weights =
+    tierTotal <= 2 ? [60, 30, 10] : tierTotal <= 5 ? [25, 50, 25] : [10, 30, 60];
+  const roll = rng() * 100;
+  let acc = 0;
+  for (let i = 0; i < weights.length; i++) {
+    acc += weights[i];
+    if (roll < acc) return i + 1;
   }
-  // Map conviction (0..max) onto tier 1..N. Max conviction = 4 axes * 6 questions = 24.
-  const maxConviction = 24;
-  const ratio = Math.min(conviction, maxConviction) / maxConviction;
-  const index = Math.min(
-    candidates.length - 1,
-    Math.floor(ratio * candidates.length),
-  );
-  return candidates[index];
+  return 3;
 }
 
-/** Run the full diagnosis: answers -> MBTI type -> assigned animal. */
+/** The animal of a given type at a given Tier (each type has tiers 1/2/3). */
+export function selectAnimal(code: string, tier: number, pool: Animal[] = ANIMALS): Animal {
+  const animal = pool.find((a) => a.type === code && a.tier === tier);
+  if (!animal) throw new Error(`No animal for type ${code} tier ${tier}`);
+  return animal;
+}
+
+/**
+ * Run the full diagnosis from 4 slider answers aligned to `questions`
+ * (one per axis, EI/NS/TF/JP order). Randomness (center tie-break + Tier draw)
+ * is injectable via `rng`.
+ */
 export function diagnose(
-  answers: Answer[],
-  questions: Question[] = QUESTIONS,
+  answers: SliderValue[],
+  questions: Question[],
+  rng: Rng = Math.random,
 ): DiagnosisResult {
-  const tallies = tallyAxes(answers, questions);
-  const code = codeFromTallies(tallies);
+  const perAxis: AxisOutcome[] = questions.map((question, i) => {
+    const value = answers[i];
+    const { left, right, tierVal } = scoreSlider(value);
+    const yesLetter = letterOf(question.yesPole, question.axis);
+    const noLetter = letterOf(question.leftPole, question.axis);
+    let letter: string;
+    if (right > left) letter = yesLetter;
+    else if (left > right) letter = noLetter;
+    else letter = rng() < 0.5 ? noLetter : yesLetter; // center tie: random 50/50
+    return { axis: question.axis, question, value, letter, tierVal };
+  });
+
+  // Build code in canonical EI/NS/TF/JP order.
+  const code = AXES.map(
+    (axis) => perAxis.find((o) => o.axis === axis)?.letter ?? "",
+  ).join("");
+
   const type = PERSONALITY_TYPES.find((t) => t.code === code);
-  if (!type) {
-    throw new Error(`No personality type defined for code ${code}`);
-  }
-  const conviction = tallies.reduce((sum, t) => sum + Math.abs(t.score), 0);
-  const animal = selectAnimal(code, conviction);
-  return { code, type, animal, tallies, conviction };
+  if (!type) throw new Error(`No personality type for code ${code}`);
+
+  const tierTotal = perAxis.reduce((sum, o) => sum + o.tierVal, 0);
+  const tier = drawTier(tierTotal, rng);
+  const animal = selectAnimal(code, tier);
+
+  return { code, type, animal, tier, tierTotal, perAxis };
 }
